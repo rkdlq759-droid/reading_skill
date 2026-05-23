@@ -1,55 +1,58 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { PassageResponse } from "@/lib/claude";
+import { FormEvent, useMemo, useState } from "react";
+import { PassageResponse, SummaryFeedbackResponse } from "@/lib/claude";
 import {
-  ArrowDown,
+  ArrowRight,
   BookOpen,
   CheckCircle2,
   ChevronLeft,
+  FileText,
   HelpCircle,
+  Lightbulb,
   ListChecks,
-  SkipForward,
-  Tags,
+  Loader2,
+  MessageSquareText,
   Type,
 } from "lucide-react";
 
 interface ReadingViewProps {
   data: PassageResponse;
-  onSubmit: (summary: string, answers: number[]) => void;
+  onSummaryFeedback: (paragraph: string, summary: string) => Promise<SummaryFeedbackResponse>;
+  onSubmit: (
+    summary: string,
+    summaryFeedback: SummaryFeedbackResponse,
+    selections: number[][],
+    answers: number[]
+  ) => void;
   isLoading: boolean;
 }
 
-type ViewMode = "reading" | "tasks";
+type ViewStage = "preview" | "summaryFeedback" | "fullReading" | "tasks";
 
-const splitKeywords = (value: string) =>
-  value
-    .split(/[,\n]/)
-    .map((keyword) => keyword.trim())
-    .filter(Boolean)
-    .slice(0, 4);
+const keyPointLabels = ["핵심 1", "핵심 2", "핵심 3"];
 
-export default function ReadingView({ data, onSubmit, isLoading }: ReadingViewProps) {
+export default function ReadingView({ data, onSummaryFeedback, onSubmit, isLoading }: ReadingViewProps) {
   const paragraphs = useMemo(
     () => data.content.split("\n\n").filter((text) => text.trim().length > 0),
     [data.content]
   );
+  const previewIndex = Math.min(Math.max(data.previewParagraphIndex ?? 0, 0), Math.max(paragraphs.length - 1, 0));
+  const previewParagraph = paragraphs[previewIndex] ?? paragraphs[0] ?? "";
+  const paragraphTasks = useMemo(
+    () => [...data.paragraphTasks].sort((a, b) => a.paragraphIndex - b.paragraphIndex),
+    [data.paragraphTasks]
+  );
 
-  const [view, setView] = useState<ViewMode>("reading");
-  const [visibleCount, setVisibleCount] = useState(() => (paragraphs.length > 0 ? 1 : 0));
-  const [keywordInputs, setKeywordInputs] = useState<string[]>(() => new Array(paragraphs.length).fill(""));
-  const [answers, setAnswers] = useState<number[]>(() => new Array(data.questions.length).fill(-1));
+  const [stage, setStage] = useState<ViewStage>("preview");
+  const [summary, setSummary] = useState("");
+  const [summaryFeedback, setSummaryFeedback] = useState<SummaryFeedbackResponse | null>(null);
+  const [isSummaryLoading, setIsSummaryLoading] = useState(false);
   const [fontSize, setFontSize] = useState<"sm" | "base" | "lg">("base");
-  const activeParagraphRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    activeParagraphRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, [visibleCount]);
-
-  const activeIndex = Math.max(visibleCount - 1, 0);
-  const hasMoreParagraphs = visibleCount < paragraphs.length;
-  const activeKeywords = splitKeywords(keywordInputs[activeIndex] ?? "");
-  const isFormValid = !answers.includes(-1);
+  const [selections, setSelections] = useState<number[][]>(() =>
+    paragraphTasks.map(() => new Array(3).fill(-1))
+  );
+  const [answers, setAnswers] = useState<number[]>(() => new Array(data.questions.length).fill(-1));
 
   const fontSizeClass = {
     sm: "text-sm md:text-base",
@@ -57,303 +60,325 @@ export default function ReadingView({ data, onSubmit, isLoading }: ReadingViewPr
     lg: "text-lg md:text-xl",
   };
 
-  const updateKeywords = (idx: number, value: string) => {
-    const nextInputs = [...keywordInputs];
-    nextInputs[idx] = value;
-    setKeywordInputs(nextInputs);
-  };
+  const isDropdownValid = selections.every((answers) => answers.length > 0 && answers.every((answer) => answer >= 0));
+  const isQuestionValid = answers.every((answer) => answer >= 0);
+  const isTaskValid = isDropdownValid && isQuestionValid;
 
-  const revealNextParagraph = () => {
-    if (hasMoreParagraphs) {
-      setVisibleCount((count) => Math.min(count + 1, paragraphs.length));
-      return;
-    }
-
-    setView("tasks");
-  };
-
-  const handleKeywordSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleSummarySubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    revealNextParagraph();
+    if (!summary.trim()) return;
+
+    setIsSummaryLoading(true);
+    try {
+      const feedback = await onSummaryFeedback(previewParagraph, summary.trim());
+      setSummaryFeedback(feedback);
+      setStage("summaryFeedback");
+    } finally {
+      setIsSummaryLoading(false);
+    }
   };
 
-  const handleAnswerChange = (qIdx: number, aIdx: number) => {
+  const handleSelectionChange = (paragraphIndex: number, keyPointIndex: number, value: string) => {
+    const nextSelections = selections.map((answers) => [...answers]);
+    nextSelections[paragraphIndex][keyPointIndex] = Number(value);
+    setSelections(nextSelections);
+  };
+
+  const handleAnswerChange = (questionIndex: number, answerIndex: number) => {
     const nextAnswers = [...answers];
-    nextAnswers[qIdx] = aIdx;
+    nextAnswers[questionIndex] = answerIndex;
     setAnswers(nextAnswers);
   };
 
-  const buildFlowSummary = () => {
-    const keywordLines = paragraphs.map((_, idx) => {
-      const keywords = splitKeywords(keywordInputs[idx] ?? "");
-      const content = keywords.length > 0 ? keywords.join(", ") : "키워드 미입력";
-      return `${idx + 1}단락: ${content}`;
-    });
-
-    return [
-      `제목: ${data.title}`,
-      "사용자가 읽으며 남긴 단락별 핵심 키워드:",
-      ...keywordLines,
-    ].join("\n");
+  const handleFinalSubmit = () => {
+    if (!summaryFeedback) return;
+    onSubmit(summary.trim(), summaryFeedback, selections, answers);
   };
 
-  if (view === "reading") {
-    const completedCount = Math.max(visibleCount - 1, 0);
-
-    return (
-      <div className="flex min-h-screen flex-col bg-background animate-in fade-in duration-500">
-        <header className="sticky top-0 z-30 flex items-center justify-between border-b border-gray-800/50 bg-background/90 p-4 backdrop-blur-xl">
-          <div className="flex min-w-0 items-center gap-2">
-            <BookOpen size={18} className="shrink-0 text-primary" />
-            <h2 className="truncate text-sm font-bold md:text-base">{data.title}</h2>
-          </div>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => setFontSize((prev) => (prev === "sm" ? "base" : prev === "base" ? "lg" : "sm"))}
-              className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-800 hover:text-white"
-              title="글자 크기 조절"
-            >
-              <Type size={18} />
-            </button>
-            <span className="rounded bg-primary/10 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-primary">
-              Flow Reading
-            </span>
-          </div>
-        </header>
-
-        <div className="mx-auto grid w-full max-w-6xl flex-1 gap-6 px-4 py-6 md:grid-cols-[minmax(0,1fr)_280px] md:px-8 md:py-8">
-          <main className="min-w-0 space-y-6 pb-28">
-            <div className="space-y-3">
-              <p className="text-xs font-bold uppercase tracking-widest text-secondary">단락을 읽고 핵심만 남기기</p>
-              <h1 className="text-3xl font-black leading-tight text-primary/90 md:text-4xl">{data.title}</h1>
-            </div>
-
-            {paragraphs.slice(0, visibleCount).map((paragraph, idx) => {
-              const isActive = idx === activeIndex;
-              const keywords = splitKeywords(keywordInputs[idx] ?? "");
-
-              return (
-                <section
-                  key={`${idx}-${paragraph.slice(0, 16)}`}
-                  ref={isActive ? activeParagraphRef : null}
-                  className={`rounded-lg border p-5 transition-all duration-500 md:p-6 ${
-                    isActive
-                      ? "border-primary/30 bg-card/70 shadow-xl shadow-primary/5"
-                      : "border-gray-800 bg-card/35"
-                  }`}
-                >
-                  <div className="mb-4 flex items-center justify-between gap-3">
-                    <span className="rounded bg-gray-800/70 px-2 py-1 text-[10px] font-bold uppercase text-gray-400">
-                      Paragraph {idx + 1}
-                    </span>
-                    {!isActive && keywords.length > 0 && (
-                      <span className="flex items-center gap-1 text-xs font-bold text-secondary">
-                        <CheckCircle2 size={14} />
-                        저장됨
-                      </span>
-                    )}
-                  </div>
-
-                  <p className={`reading-text whitespace-pre-wrap text-foreground/90 ${fontSizeClass[fontSize]}`}>
-                    {paragraph}
-                  </p>
-
-                  {isActive ? (
-                    <form onSubmit={handleKeywordSubmit} className="mt-6 space-y-4 border-t border-gray-800 pt-5">
-                      <label className="flex items-center gap-2 text-sm font-bold text-gray-200">
-                        <Tags size={16} className="text-secondary" />
-                        이 단락의 핵심 키워드 2~3개
-                      </label>
-                      <input
-                        value={keywordInputs[idx] ?? ""}
-                        onChange={(event) => updateKeywords(idx, event.target.value)}
-                        className="w-full rounded-lg border border-gray-700 bg-background/70 px-4 py-3 text-sm outline-none transition-all placeholder:text-gray-600 focus:border-secondary focus:ring-2 focus:ring-secondary/20"
-                        placeholder="예: 문제 제기, 비용 증가, 자동화"
-                      />
-                      <div className="flex flex-col gap-3 sm:flex-row">
-                        <button
-                          type="submit"
-                          disabled={activeKeywords.length === 0}
-                          className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-secondary px-4 py-3 text-sm font-bold text-white transition-all hover:bg-secondary/90 disabled:opacity-35"
-                        >
-                          {hasMoreParagraphs ? (
-                            <>
-                              다음 단락 보기
-                              <ArrowDown size={16} />
-                            </>
-                          ) : (
-                            <>
-                              문제로 이동
-                              <ListChecks size={16} />
-                            </>
-                          )}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={revealNextParagraph}
-                          className="flex items-center justify-center gap-2 rounded-lg border border-gray-700 px-4 py-3 text-sm font-bold text-gray-300 transition-colors hover:border-gray-500 hover:bg-gray-800/50"
-                        >
-                          <SkipForward size={16} />
-                          건너뛰기
-                        </button>
-                      </div>
-                    </form>
-                  ) : (
-                    <div className="mt-5 flex flex-wrap gap-2 border-t border-gray-800 pt-4">
-                      {keywords.length > 0 ? (
-                        keywords.map((keyword) => (
-                          <span key={keyword} className="rounded-full bg-secondary/10 px-3 py-1 text-xs font-bold text-secondary">
-                            {keyword}
-                          </span>
-                        ))
-                      ) : (
-                        <span className="text-xs text-gray-500">키워드 없이 넘어간 단락</span>
-                      )}
-                    </div>
-                  )}
-                </section>
-              );
-            })}
-          </main>
-
-          <aside className="sticky top-[73px] order-first h-fit rounded-lg border border-gray-800 bg-card/70 p-4 md:order-none">
-            <div className="mb-4 flex items-center justify-between">
-              <div className="flex items-center gap-2 font-bold">
-                <ListChecks size={17} className="text-secondary" />
-                흐름 가이드
-              </div>
-              <span className="text-xs text-gray-500">
-                {completedCount}/{paragraphs.length}
-              </span>
-            </div>
-            <div className="space-y-3">
-              {paragraphs.map((_, idx) => {
-                const isVisible = idx < visibleCount;
-                const keywords = splitKeywords(keywordInputs[idx] ?? "");
-
-                return (
-                  <div
-                    key={idx}
-                    className={`rounded-lg border p-3 ${
-                      isVisible ? "border-gray-700 bg-background/45" : "border-gray-800/70 bg-background/20 opacity-45"
-                    }`}
-                  >
-                    <div className="mb-2 text-[10px] font-black uppercase tracking-widest text-gray-500">
-                      P{idx + 1}
-                    </div>
-                    {keywords.length > 0 ? (
-                      <div className="flex flex-wrap gap-1.5">
-                        {keywords.map((keyword) => (
-                          <span key={keyword} className="rounded bg-secondary/10 px-2 py-1 text-[11px] font-bold text-secondary">
-                            {keyword}
-                          </span>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="text-xs text-gray-500">{isVisible ? "읽는 중" : "아직 잠김"}</p>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </aside>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="flex min-h-screen flex-col bg-background animate-in slide-in-from-right duration-500">
-      <header className="sticky top-0 z-20 flex items-center justify-between border-b border-gray-800/50 bg-background/90 p-4 backdrop-blur-xl">
-        <button
-          onClick={() => setView("reading")}
-          className="flex items-center gap-1 text-sm text-gray-400 transition-colors hover:text-white"
-        >
-          <ChevronLeft size={16} />
-          지문으로 돌아가기
-        </button>
-        <span className="rounded bg-secondary/10 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-secondary">
-          Assessment
-        </span>
+    <div className="flex min-h-screen flex-col bg-background animate-in fade-in duration-500">
+      <header className="sticky top-0 z-30 flex items-center justify-between border-b border-gray-800/50 bg-background/90 p-4 backdrop-blur-xl">
+        <div className="flex min-w-0 items-center gap-2">
+          <BookOpen size={18} className="shrink-0 text-primary" />
+          <h2 className="truncate text-sm font-bold md:text-base">{data.title}</h2>
+        </div>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setFontSize((prev) => (prev === "sm" ? "base" : prev === "base" ? "lg" : "sm"))}
+            className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-800 hover:text-white"
+            title="글자 크기 조절"
+          >
+            <Type size={18} />
+          </button>
+          <span className="rounded bg-primary/10 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-primary">
+            Flow Reading
+          </span>
+        </div>
       </header>
 
-      <div className="mx-auto w-full max-w-2xl flex-1 space-y-10 overflow-y-auto p-6 pb-32 md:p-10">
-        <section className="space-y-4 rounded-lg border border-gray-800 bg-card/50 p-5">
-          <div className="flex items-center gap-2 text-secondary">
-            <Tags size={18} />
-            <h2 className="text-lg font-bold">읽으며 남긴 흐름</h2>
-          </div>
-          <div className="space-y-3">
-            {paragraphs.map((_, idx) => {
-              const keywords = splitKeywords(keywordInputs[idx] ?? "");
-              return (
-                <div key={idx} className="flex gap-3 text-sm">
-                  <span className="w-10 shrink-0 font-bold text-gray-500">P{idx + 1}</span>
-                  <span className="text-gray-300">
-                    {keywords.length > 0 ? keywords.join(", ") : "키워드 미입력"}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-
-        <section className="space-y-8">
-          <div className="flex items-center gap-2">
-            <HelpCircle size={20} className="text-secondary" />
-            <h2 className="text-xl font-bold">확인 문제</h2>
-          </div>
-
-          {data.questions.map((q, qIdx) => (
-            <div
-              key={q.id}
-              className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-500"
-              style={{ animationDelay: `${qIdx * 100}ms` }}
-            >
-              <p className="text-base font-bold leading-relaxed md:text-lg">
-                <span className="mr-2 text-secondary">Q{qIdx + 1}.</span>
-                {q.question}
+      {stage === "preview" && (
+        <main className="mx-auto grid w-full max-w-6xl flex-1 gap-8 px-4 py-6 md:grid-cols-[minmax(0,1fr)_320px] md:px-8 md:py-10">
+          <section className="space-y-6">
+            <div className="space-y-3">
+              <p className="text-xs font-bold uppercase tracking-widest text-secondary">먼저 한 문단만 읽기</p>
+              <h1 className="text-3xl font-black leading-tight text-primary/90 md:text-4xl">{data.title}</h1>
+              <p className="text-sm leading-relaxed text-gray-400">
+                전체 지문을 보기 전에 선택된 문단 하나를 읽고, 지금 이해한 내용을 직접 요약해 보세요.
               </p>
-              <div className="space-y-3">
-                {q.options.map((option, aIdx) => (
-                  <button
-                    key={option}
-                    onClick={() => handleAnswerChange(qIdx, aIdx)}
-                    className={`w-full rounded-lg border p-4 text-left transition-all duration-200 md:p-5 ${
-                      answers[qIdx] === aIdx
-                        ? "border-secondary bg-secondary/10 text-secondary shadow-lg shadow-secondary/10 ring-1 ring-secondary/50"
-                        : "border-gray-800 bg-card/50 hover:border-gray-600 hover:bg-gray-800/30"
-                    }`}
-                  >
-                    <div className="flex items-center gap-3">
-                      <span
-                        className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs ${
-                          answers[qIdx] === aIdx ? "border-secondary bg-secondary text-white" : "border-gray-700"
-                        }`}
-                      >
-                        {aIdx + 1}
-                      </span>
-                      <span className="text-sm md:text-base">{option}</span>
-                    </div>
-                  </button>
-                ))}
-              </div>
             </div>
-          ))}
-        </section>
-      </div>
 
-      <div className="pointer-events-none fixed bottom-0 left-0 right-0 z-10 bg-gradient-to-t from-background via-background/90 to-transparent p-6 pt-12">
-        <div className="pointer-events-auto mx-auto w-full max-w-2xl">
+            <article className="rounded-lg border border-primary/25 bg-card/70 p-5 shadow-xl shadow-primary/5 md:p-7">
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <span className="rounded bg-gray-800/70 px-2 py-1 text-[10px] font-bold uppercase text-gray-400">
+                  Paragraph {previewIndex + 1}
+                </span>
+                <span className="text-xs font-bold text-secondary">요약 전용 문단</span>
+              </div>
+              <p className={`reading-text whitespace-pre-wrap text-foreground/90 ${fontSizeClass[fontSize]}`}>
+                {previewParagraph}
+              </p>
+            </article>
+
+            <form onSubmit={handleSummarySubmit} className="space-y-4 rounded-lg border border-gray-800 bg-card/45 p-5">
+              <label className="flex items-center gap-2 text-sm font-bold text-gray-200">
+                <MessageSquareText size={16} className="text-secondary" />
+                이 문단을 한두 문장으로 요약하기
+              </label>
+              <textarea
+                value={summary}
+                onChange={(event) => setSummary(event.target.value)}
+                rows={5}
+                className="w-full resize-none rounded-lg border border-gray-700 bg-background/70 px-4 py-3 text-sm leading-relaxed outline-none transition-all placeholder:text-gray-600 focus:border-secondary focus:ring-2 focus:ring-secondary/20"
+                placeholder="문단의 중심 생각과 근거를 포함해 요약해 보세요."
+              />
+              <button
+                type="submit"
+                disabled={!summary.trim() || isSummaryLoading}
+                className="flex w-full items-center justify-center gap-2 rounded-lg bg-secondary px-4 py-3 text-sm font-bold text-white transition-all hover:bg-secondary/90 disabled:opacity-35"
+              >
+                {isSummaryLoading ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" />
+                    요약 피드백 생성 중
+                  </>
+                ) : (
+                  <>
+                    피드백 받기
+                    <ArrowRight size={16} />
+                  </>
+                )}
+              </button>
+            </form>
+          </section>
+
+          <aside className="order-first h-fit rounded-lg border border-gray-800 bg-card/70 p-4 md:order-none md:sticky md:top-[73px]">
+            <div className="mb-4 flex items-center gap-2 font-bold">
+              <ListChecks size={17} className="text-secondary" />
+              진행 흐름
+            </div>
+            <ol className="space-y-3 text-sm text-gray-400">
+              <li className="font-bold text-secondary">1. 한 문단 읽고 요약</li>
+              <li>2. 요약 피드백 확인</li>
+              <li>3. 전체 지문 읽기</li>
+              <li>4. 문단별 핵심 3가지 선택</li>
+              <li>5. 객관식 문제 풀이</li>
+              <li>6. 최종 피드백 확인</li>
+            </ol>
+          </aside>
+        </main>
+      )}
+
+      {stage === "summaryFeedback" && summaryFeedback && (
+        <main className="mx-auto w-full max-w-3xl flex-1 space-y-6 px-4 py-8 md:px-8 md:py-10">
+          <section className="space-y-5 rounded-lg border border-gray-800 bg-card/60 p-6">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-2 text-secondary">
+                <Lightbulb size={20} />
+                <h1 className="text-xl font-bold">요약 피드백</h1>
+              </div>
+              <span className="rounded bg-primary/10 px-3 py-1 text-sm font-black text-primary">
+                {summaryFeedback.score}/100
+              </span>
+            </div>
+            <div className="rounded-lg border border-gray-800 bg-background/45 p-4">
+              <p className="text-xs font-bold uppercase tracking-widest text-gray-500">내 요약</p>
+              <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-gray-200">{summary}</p>
+            </div>
+            <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground/90">{summaryFeedback.feedback}</p>
+            <div className="rounded-lg bg-primary/10 p-4 text-sm leading-relaxed text-primary">
+              {summaryFeedback.revisionTip}
+            </div>
+          </section>
+
           <button
-            onClick={() => onSubmit(buildFlowSummary(), answers)}
-            disabled={!isFormValid || isLoading}
-            className="w-full rounded-lg bg-secondary py-4 text-lg font-bold text-white shadow-2xl shadow-secondary/20 transition-all hover:bg-secondary/90 active:scale-[0.98] disabled:opacity-30 disabled:grayscale disabled:shadow-none md:py-5"
+            onClick={() => setStage("fullReading")}
+            className="flex w-full items-center justify-center gap-2 rounded-lg bg-secondary px-4 py-4 text-base font-bold text-white transition-all hover:bg-secondary/90"
           >
-            {isLoading ? "AI 분석 중..." : "제출하고 결과 보기"}
+            전체 지문 읽기
+            <ArrowRight size={18} />
           </button>
-        </div>
-      </div>
+        </main>
+      )}
+
+      {stage === "fullReading" && (
+        <main className="mx-auto w-full max-w-4xl flex-1 space-y-8 px-4 py-8 pb-28 md:px-8 md:py-10">
+          <div className="space-y-3">
+            <p className="text-xs font-bold uppercase tracking-widest text-secondary">전체 지문 읽기</p>
+            <h1 className="text-3xl font-black leading-tight text-primary/90 md:text-4xl">{data.title}</h1>
+          </div>
+
+          <div className="space-y-5">
+            {paragraphs.map((paragraph, idx) => (
+              <article
+                key={`${idx}-${paragraph.slice(0, 16)}`}
+                className={`rounded-lg border p-5 md:p-6 ${
+                  idx === previewIndex ? "border-primary/30 bg-card/70" : "border-gray-800 bg-card/35"
+                }`}
+              >
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <span className="rounded bg-gray-800/70 px-2 py-1 text-[10px] font-bold uppercase text-gray-400">
+                    Paragraph {idx + 1}
+                  </span>
+                  {idx === previewIndex && (
+                    <span className="flex items-center gap-1 text-xs font-bold text-secondary">
+                      <CheckCircle2 size={14} />
+                      먼저 요약한 문단
+                    </span>
+                  )}
+                </div>
+                <p className={`reading-text whitespace-pre-wrap text-foreground/90 ${fontSizeClass[fontSize]}`}>
+                  {paragraph}
+                </p>
+              </article>
+            ))}
+          </div>
+
+          <button
+            onClick={() => setStage("tasks")}
+            className="fixed bottom-6 left-1/2 z-20 flex w-[calc(100%-2rem)] max-w-2xl -translate-x-1/2 items-center justify-center gap-2 rounded-lg bg-secondary px-4 py-4 text-base font-bold text-white shadow-2xl shadow-secondary/20 transition-all hover:bg-secondary/90"
+          >
+            핵심 내용 선택하기
+            <ArrowRight size={18} />
+          </button>
+        </main>
+      )}
+
+      {stage === "tasks" && (
+        <main className="mx-auto w-full max-w-4xl flex-1 space-y-8 px-4 py-8 pb-32 md:px-8 md:py-10">
+          <div className="flex items-center justify-between gap-4">
+            <button
+              onClick={() => setStage("fullReading")}
+              className="flex items-center gap-1 text-sm text-gray-400 transition-colors hover:text-white"
+            >
+              <ChevronLeft size={16} />
+              지문으로 돌아가기
+            </button>
+            <span className="rounded bg-secondary/10 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-secondary">
+              Dropdown Check
+            </span>
+          </div>
+
+          <section className="space-y-3">
+            <div className="flex items-center gap-2">
+              <FileText size={20} className="text-secondary" />
+              <h1 className="text-2xl font-bold">문단별 핵심 내용 3가지</h1>
+            </div>
+            <p className="text-sm leading-relaxed text-gray-400">
+              각 문단을 다시 떠올리며 아래에서 위로 흐름을 정리하듯, 핵심 내용 3가지를 드롭다운에서 선택하세요.
+            </p>
+          </section>
+
+          <section className="space-y-6">
+            {paragraphTasks.map((task, taskIdx) => (
+              <article key={task.paragraphIndex} className="space-y-5 rounded-lg border border-gray-800 bg-card/50 p-5">
+                <div>
+                  <span className="rounded bg-gray-800/70 px-2 py-1 text-[10px] font-bold uppercase text-gray-400">
+                    Paragraph {task.paragraphIndex + 1}
+                  </span>
+                  <p className="mt-3 line-clamp-3 text-sm leading-relaxed text-gray-400">
+                    {paragraphs[task.paragraphIndex]}
+                  </p>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-3">
+                  {(task.keyPoints.length > 0 ? task.keyPoints : keyPointLabels).slice(0, 3).map((_, keyPointIdx) => (
+                    <label key={keyPointIdx} className="space-y-2">
+                      <span className="text-xs font-bold text-secondary">{keyPointLabels[keyPointIdx]}</span>
+                      <select
+                        value={selections[taskIdx]?.[keyPointIdx] ?? -1}
+                        onChange={(event) => handleSelectionChange(taskIdx, keyPointIdx, event.target.value)}
+                        className="w-full rounded-lg border border-gray-700 bg-background px-3 py-3 text-sm text-foreground outline-none transition-all focus:border-secondary focus:ring-2 focus:ring-secondary/20"
+                      >
+                        <option value={-1}>정답 선택</option>
+                        {task.options.map((option, optionIdx) => (
+                          <option key={option} value={optionIdx}>
+                            {option}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              </article>
+            ))}
+          </section>
+
+          <section className="space-y-6">
+            <div className="flex items-center gap-2">
+              <HelpCircle size={20} className="text-secondary" />
+              <h2 className="text-2xl font-bold">객관식 확인 문제</h2>
+            </div>
+
+            {data.questions.map((question, questionIdx) => (
+              <article key={question.id} className="space-y-4 rounded-lg border border-gray-800 bg-card/50 p-5">
+                <p className="text-base font-bold leading-relaxed md:text-lg">
+                  <span className="mr-2 text-secondary">Q{questionIdx + 1}.</span>
+                  {question.question}
+                </p>
+                <div className="space-y-3">
+                  {question.options.map((option, optionIdx) => (
+                    <button
+                      key={option}
+                      type="button"
+                      onClick={() => handleAnswerChange(questionIdx, optionIdx)}
+                      className={`w-full rounded-lg border p-4 text-left transition-all duration-200 md:p-5 ${
+                        answers[questionIdx] === optionIdx
+                          ? "border-secondary bg-secondary/10 text-secondary shadow-lg shadow-secondary/10 ring-1 ring-secondary/50"
+                          : "border-gray-800 bg-background/35 hover:border-gray-600 hover:bg-gray-800/30"
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <span
+                          className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs ${
+                            answers[questionIdx] === optionIdx
+                              ? "border-secondary bg-secondary text-white"
+                              : "border-gray-700"
+                          }`}
+                        >
+                          {optionIdx + 1}
+                        </span>
+                        <span className="text-sm md:text-base">{option}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </article>
+            ))}
+          </section>
+
+          <div className="fixed bottom-0 left-0 right-0 z-10 bg-gradient-to-t from-background via-background/90 to-transparent p-6 pt-12">
+            <div className="mx-auto w-full max-w-2xl">
+              <button
+                onClick={handleFinalSubmit}
+                disabled={!isTaskValid || isLoading}
+                className="w-full rounded-lg bg-secondary py-4 text-lg font-bold text-white shadow-2xl shadow-secondary/20 transition-all hover:bg-secondary/90 active:scale-[0.98] disabled:opacity-30 disabled:grayscale disabled:shadow-none md:py-5"
+              >
+                {isLoading ? "AI 분석 중..." : "제출하고 결과 보기"}
+              </button>
+            </div>
+          </div>
+        </main>
+      )}
     </div>
   );
 }
