@@ -45,9 +45,13 @@ export interface FeedbackResponse {
 
 const MODEL = "claude-haiku-4-5-20251001";
 
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function createAnthropicClient() {
   const apiKey = process.env.API_KEY;
-  if (!apiKey) throw new Error("API_KEY is not defined");
+  if (!apiKey) throw new Error("API_KEY is not configured on the server");
 
   return new Anthropic({
     apiKey,
@@ -67,6 +71,22 @@ function parseJsonObject<T>(text: string): T {
   }
 
   return JSON.parse(withoutCodeFence.slice(start, end + 1)) as T;
+}
+
+function assertPassageResponse(data: PassageResponse) {
+  const paragraphs = data.content?.split("\n\n").filter((text) => text.trim().length > 0) ?? [];
+
+  if (!data.title || paragraphs.length === 0) {
+    throw new Error("Claude response is missing title or content");
+  }
+
+  if (!Array.isArray(data.paragraphTasks) || data.paragraphTasks.length !== paragraphs.length) {
+    throw new Error("Claude response is missing paragraph tasks for every paragraph");
+  }
+
+  if (!Array.isArray(data.questions) || data.questions.length < 3) {
+    throw new Error("Claude response is missing multiple-choice questions");
+  }
 }
 
 export async function generatePassage(topic: string): Promise<PassageResponse> {
@@ -127,15 +147,24 @@ export async function generatePassage(topic: string): Promise<PassageResponse> {
 
   const response = await anthropic.messages.create({
     model: MODEL,
-    max_tokens: 4000,
+    max_tokens: 8000,
     messages: [{ role: "user", content: prompt }],
     system: "You are a professional Korean educational content creator. Always respond with valid JSON only.",
   });
 
   const content = response.content[0];
   if (content.type !== "text") throw new Error("Unexpected response from Claude");
+  if (response.stop_reason === "max_tokens") {
+    throw new Error("Claude response was truncated before JSON was complete");
+  }
 
-  return parseJsonObject<PassageResponse>(content.text);
+  try {
+    const data = parseJsonObject<PassageResponse>(content.text);
+    assertPassageResponse(data);
+    return data;
+  } catch (error) {
+    throw new Error(`Invalid passage response: ${getErrorMessage(error)}`);
+  }
 }
 
 export async function evaluatePreviewSummary(

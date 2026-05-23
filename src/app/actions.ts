@@ -11,12 +11,16 @@ import {
   generatePassage,
 } from "@/lib/claude";
 
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export async function getPassageAction(topic: string): Promise<PassageResponse> {
   try {
     const data = await generatePassage(topic);
     return data;
   } catch (error) {
-    console.error("Error generating passage:", error);
+    console.error("Error generating passage:", getErrorMessage(error));
     throw new Error("지문을 생성하는 중 오류가 발생했습니다.");
   }
 }
