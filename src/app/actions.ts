@@ -20,8 +20,13 @@ export async function getPassageAction(topic: string): Promise<PassageResponse> 
     const data = await generatePassage(topic);
     return data;
   } catch (error) {
-    console.error("Error generating passage:", getErrorMessage(error));
-    throw new Error("지문을 생성하는 중 오류가 발생했습니다.");
+    const message = getErrorMessage(error);
+    console.error("Error generating passage:", message);
+    throw new Error(
+      process.env.NODE_ENV === "development"
+        ? `지문을 생성하는 중 오류가 발생했습니다. 상세: ${message}`
+        : "지문을 생성하는 중 오류가 발생했습니다."
+    );
   }
 }
 
