@@ -99,12 +99,13 @@ export async function generatePassage(topic: string): Promise<PassageResponse> {
 난이도는 고등학교 1학년 이상, 수능 비문학 또는 경제/기술 기사 수준으로 맞추세요.
 
 조건:
-- 지문은 3~5개 단락으로 구성하세요.
+- 지문은 정확히 3개 단락으로 구성하세요.
 - 각 단락은 \\n\\n으로 구분하세요.
 - 글의 논리 구조가 명확해야 합니다.
 - previewParagraphIndex에는 사용자가 전체 지문을 보기 전에 먼저 읽고 요약할 단락 하나의 0부터 시작하는 번호를 넣으세요.
 - 사용자가 전체 지문을 읽은 뒤 각 단락의 핵심 내용을 확인할 수 있도록, 단락마다 3개의 핵심 내용을 만드세요.
-- paragraphTasks.options에는 정답 3개를 포함해 총 6개의 선택지를 넣으세요.
+- paragraphTasks에는 0번, 1번, 2번 단락에 대응하는 객체를 정확히 3개 넣으세요.
+- paragraphTasks.options에는 각 단락마다 정답 3개를 포함해 총 6개의 선택지를 넣으세요.
 - paragraphTasks.correctAnswers는 keyPoints 3개 각각에 해당하는 options의 1부터 시작하는 번호 배열입니다.
 - 지문 내용만 근거로 풀 수 있는 객관식 문제 3개를 만드세요.
 - 객관식 정답은 지문 안에서 논리적으로 추론 가능해야 합니다.
@@ -122,6 +123,20 @@ export async function generatePassage(topic: string): Promise<PassageResponse> {
       "keyPoints": ["첫 번째 핵심 내용", "두 번째 핵심 내용", "세 번째 핵심 내용"],
       "options": ["선택지 1", "선택지 2", "선택지 3", "선택지 4", "선택지 5", "선택지 6"],
       "correctAnswers": [2, 4, 1],
+      "explanation": "이 단락에서 세 핵심 내용이 중요한 이유"
+    },
+    {
+      "paragraphIndex": 1,
+      "keyPoints": ["첫 번째 핵심 내용", "두 번째 핵심 내용", "세 번째 핵심 내용"],
+      "options": ["선택지 1", "선택지 2", "선택지 3", "선택지 4", "선택지 5", "선택지 6"],
+      "correctAnswers": [3, 1, 5],
+      "explanation": "이 단락에서 세 핵심 내용이 중요한 이유"
+    },
+    {
+      "paragraphIndex": 2,
+      "keyPoints": ["첫 번째 핵심 내용", "두 번째 핵심 내용", "세 번째 핵심 내용"],
+      "options": ["선택지 1", "선택지 2", "선택지 3", "선택지 4", "선택지 5", "선택지 6"],
+      "correctAnswers": [1, 6, 2],
       "explanation": "이 단락에서 세 핵심 내용이 중요한 이유"
     }
   ],
